@@ -13,6 +13,8 @@ plotly>=5.15.0
 pdfminer.six>=20221105
 docx2txt>=0.8
 python-pptx>=0.6.21
+reportlab
+
 
 # Testing dependencies
 pytest>=7.0.0
