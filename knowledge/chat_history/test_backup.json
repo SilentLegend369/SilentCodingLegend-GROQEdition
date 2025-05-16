@@ -1,0 +1,14 @@
+{
+  "metadata": {
+    "document": "Test Document.pdf",
+    "timestamp": "20250514_121500",
+    "session_id": "test123",
+    "model": "llama3-70b-8192",
+    "date": "2025-05-14",
+    "time": "12:15:00"
+  },
+  "messages": [
+    {"role": "user", "content": "What is in this document?"},
+    {"role": "assistant", "content": "This document contains test information for debugging."}
+  ]
+}

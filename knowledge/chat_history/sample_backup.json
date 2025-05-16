@@ -1,0 +1,14 @@
+{
+  "metadata": {
+    "document": "Sample Document.txt",
+    "timestamp": "20250514_122000",
+    "session_id": "sample456",
+    "model": "llama3-70b-8192",
+    "date": "2025-05-14",
+    "time": "12:20:00"
+  },
+  "messages": [
+    {"role": "user", "content": "Can you summarize this document?"},
+    {"role": "assistant", "content": "The document discusses several important topics related to AI development."}
+  ]
+}

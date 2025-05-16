@@ -1,0 +1,876 @@
+"""
+VisionAI page for SilentCodingLegend AI.
+This page allows users to upload images and get AI-generated descriptions and analysis.
+"""
+
+import streamlit as st
+
+# Set page configuration - must be the first Streamlit command
+st.set_page_config(
+    page_title="Vision AI | SilentCodingLegend AI",
+    page_icon="👁️",
+    layout="wide",
+)
+
+import os
+import time
+import base64
+import logging
+from PIL import Image
+from io import BytesIO
+import json
+from datetime import datetime
+import uuid
+
+# Import configuration and utilities
+from src.config import (
+    APP_NAME, APP_DESCRIPTION, CURRENT_YEAR,
+    VISION_MODELS, ALLOWED_IMAGE_EXTENSIONS, MAX_IMAGE_SIZE_MB,
+    IMAGE_UPLOAD_PATH
+)
+from src.utils import (
+    apply_custom_style, get_groq_client, is_valid_image_extension, 
+    save_uploaded_image, query_groq_vision_model, backup_chat_history
+)
+from src.performance_opt import cached_query_groq_vision_model
+from src.vision_advanced import (
+    create_selectable_image_regions, 
+    create_image_comparison_ui,
+    create_image_annotation_ui,
+    highlight_image_region
+)
+from src.mobile_optimization import (
+    get_device_type, 
+    optimize_for_mobile, 
+    adaptive_image_display,
+    create_adaptive_container,
+    create_mobile_navigation
+)
+
+# Define utility functions
+def encode_image_to_base64(image_path):
+    """Encode image file to base64 string"""
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+# Apply dark theme styling and mobile optimizations
+apply_custom_style()
+device_type = get_device_type()
+optimize_for_mobile()
+
+# Initialize session state for VisionAI
+if "vision_messages" not in st.session_state:
+    st.session_state.vision_messages = []
+if "vision_selected_model" not in st.session_state:
+    st.session_state.vision_selected_model = "llama-3.1-70b-vision"
+if "vision_temperature" not in st.session_state:
+    st.session_state.vision_temperature = 0.7
+if "last_uploaded_image" not in st.session_state:
+    st.session_state.last_uploaded_image = None
+if "vision_session_id" not in st.session_state:
+    import uuid
+    st.session_state.vision_session_id = str(uuid.uuid4())[:8]
+
+# Page header
+st.title("👁️ VisionAI")
+st.markdown("""
+    <div style="padding: 10px; border-radius: 10px; background-color: #2d2d2d; margin-bottom: 20px; border-left: 4px solid #7e57c2;">
+        <p style="color: #e0e0e0; margin: 0;">Upload images and get descriptions, analysis, or ask questions about their content</p>
+    </div>
+""", unsafe_allow_html=True)
+
+# Sidebar for model settings and options
+with st.sidebar:
+    st.markdown("""
+        <h2 style="color: #7e57c2; margin-bottom: 20px; text-align: center;">VisionAI Settings</h2>
+    """, unsafe_allow_html=True)
+    
+    # Create adaptive container for model settings
+    model_settings_container = create_adaptive_container(content_type="settings", mobile_collapsed=device_type=="mobile")
+    
+    with model_settings_container:
+        # Model selection with custom styling
+        st.markdown('<p style="color: #b39ddb; font-weight: bold;">Select Vision Model:</p>', unsafe_allow_html=True)
+    
+    model_options = list(VISION_MODELS.keys())
+    model_display_names = [VISION_MODELS[m]["display_name"] for m in model_options]
+    
+    model_index = model_options.index(st.session_state.vision_selected_model) if st.session_state.vision_selected_model in model_options else 0
+    
+    selected_display = st.selectbox(
+        "Vision Model",
+        model_display_names,
+        index=model_index,
+        help="Select a model with vision capabilities",
+        label_visibility="collapsed"
+    )
+    
+    # Get selected model key
+    selected_index = model_display_names.index(selected_display)
+    model = model_options[selected_index]
+    st.session_state.vision_selected_model = model
+    
+    # Show model description
+    st.markdown(f"""
+        <div style="background-color: #1e1e1e; padding: 10px; border-radius: 5px; margin-top: 10px;">
+            <p style="color: #e0e0e0; font-size: 0.9em; margin: 0;"><strong>{VISION_MODELS[model]['display_name']}</strong></p>
+            <p style="color: #b39ddb; font-size: 0.85em; margin: 5px 0 0 0;">{VISION_MODELS[model]['description']}</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Temperature control
+    st.markdown('<p style="color: #b39ddb; font-weight: bold; margin-top: 15px;">Temperature:</p>', unsafe_allow_html=True)
+    
+    temperature = st.slider(
+        "Temperature", 
+        min_value=0.0, 
+        max_value=1.0, 
+        value=st.session_state.vision_temperature, 
+        step=0.1,
+        help="Controls creativity in responses.",
+        label_visibility="collapsed"
+    )
+    st.session_state.vision_temperature = temperature
+    
+    # Show temperature recommendation
+    recommended_temp = VISION_MODELS[model]["recommended_temp"]
+    if abs(temperature - recommended_temp) > 0.2:
+        st.markdown(f"""
+            <div style="background-color: #2d2d2d; padding: 8px; border-radius: 5px; margin-top: 5px; border-left: 2px solid #ff9800;">
+                <p style="color: #e0e0e0; font-size: 0.85em; margin: 0;">⚠️ Recommended temperature for this model is {recommended_temp}</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    # Advanced options
+    with st.expander("🔧 Advanced Options", expanded=False):
+        # Max tokens setting
+        st.markdown('<p style="color: #b39ddb; font-weight: bold;">Max Tokens:</p>', unsafe_allow_html=True)
+        
+        if "vision_max_tokens" not in st.session_state:
+            st.session_state.vision_max_tokens = 2048
+        
+        max_tokens = st.slider(
+            "Max Tokens",
+            min_value=512,
+            max_value=4096,
+            value=st.session_state.vision_max_tokens,
+            step=256,
+            help="Maximum length of model's response."
+        )
+        st.session_state.vision_max_tokens = max_tokens
+        
+        # Performance settings
+        st.markdown('<p style="color: #b39ddb; font-weight: bold; margin-top: 10px;">Performance:</p>', unsafe_allow_html=True)
+        
+        # Initialize cache settings if needed
+        if "vision_cache_enabled" not in st.session_state:
+            st.session_state.vision_cache_enabled = True
+            
+        # Cache toggle
+        cache_enabled = st.toggle(
+            "Enable response caching",
+            value=st.session_state.vision_cache_enabled,
+            help="Cache responses to improve performance for repeated image analyses"
+        )
+        
+        if cache_enabled != st.session_state.vision_cache_enabled:
+            st.session_state.vision_cache_enabled = cache_enabled
+            status = "enabled" if cache_enabled else "disabled"
+            st.success(f"Vision response caching {status}")
+    
+    # About section
+    st.divider()
+    st.markdown(f"""
+        <div style="background-color: #2d2d2d; padding: 15px; border-radius: 10px; border-left: 3px solid #7e57c2;">
+            <h3 style="color: #7e57c2; margin-top: 0;">About VisionAI</h3>
+            <p style="color: #e0e0e0; font-size: 0.9em;">VisionAI uses Groq's multimodal models to analyze images and provide detailed descriptions or answers to your questions about the image content.</p>
+            <p style="color: #e0e0e0; font-size: 0.9em;">Supported image formats:</p>
+            <p style="color: #e0e0e0; font-size: 0.85em; margin-top: 5px;">
+                {', '.join([f'.{ext}' for ext in ALLOWED_IMAGE_EXTENSIONS])}
+            </p>
+            <p style="color: #e0e0e0; font-size: 0.85em; margin-top: 5px;">
+                Max file size: {MAX_IMAGE_SIZE_MB}MB
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
+
+# Main content area with tabs
+tabs = st.tabs(["Image Analysis", "Advanced Features", "History"])
+
+with tabs[0]:
+    # Image upload area
+    st.markdown("### Upload an Image")
+    st.markdown("""
+        <p style="color: #e0e0e0; font-size: 0.9em;">
+            Upload an image and ask a question or get a description of what's in it.
+        </p>
+    """, unsafe_allow_html=True)
+    
+    uploaded_file = st.file_uploader(
+        "Choose an image",
+        type=ALLOWED_IMAGE_EXTENSIONS,
+        help=f"Supported formats: {', '.join(ALLOWED_IMAGE_EXTENSIONS)}. Max size: {MAX_IMAGE_SIZE_MB}MB"
+    )
+    
+    # Display uploaded image
+    if uploaded_file is not None:
+        # Check file size
+        file_size_mb = uploaded_file.size / (1024 * 1024)  # Convert to MB
+        if file_size_mb > MAX_IMAGE_SIZE_MB:
+            st.error(f"File size exceeds the maximum allowed size of {MAX_IMAGE_SIZE_MB}MB. Please upload a smaller image.")
+        else:
+            # Save the image and display it
+            image_path = save_uploaded_image(uploaded_file)
+            st.session_state.last_uploaded_image = image_path
+            
+            # Display the image
+            image = Image.open(image_path)
+            # Display uploaded image
+            adaptive_image_display(image, 400)
+            
+            # Image properties
+            width, height = image.size
+            st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 8px; border-radius: 5px; margin: 10px 0;">
+                    <p style="color: #b39ddb; font-size: 0.85em; margin: 0;">Image details: {width}x{height} px • {file_size_mb:.2f} MB • {uploaded_file.type}</p>
+                </div>
+            """, unsafe_allow_html=True)
+    
+    # Prompt input
+    prompt_placeholder = "Ask a question about the image or leave blank for a general description"
+    user_prompt = st.text_area(
+        "Your question or prompt",
+        height=100,
+        placeholder=prompt_placeholder,
+        help="You can ask specific questions about the image or leave this blank to get a general description"
+    )
+    
+    # Set default prompt if empty
+    if user_prompt.strip() == "":
+        user_prompt = "Please provide a detailed description of this image. What do you see in it? Include any important details, text, people, objects, or notable elements."
+    
+    # Process button
+    analyze_button = st.button("Analyze Image", type="primary", disabled=uploaded_file is None)
+    
+    if analyze_button and st.session_state.last_uploaded_image:
+        if os.path.exists(st.session_state.last_uploaded_image):
+            # Prepare the message with the image
+            base64_image = encode_image_to_base64(st.session_state.last_uploaded_image)
+            
+            # Create the user message with image content
+            user_message = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/{uploaded_file.type.split('/')[-1]};base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+            
+            # Add to session state (just the text part for display)
+            st.session_state.vision_messages.append({"role": "user", "content": user_prompt, "has_image": True})
+            
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(user_prompt)
+                st.image(st.session_state.last_uploaded_image, width=300)
+            
+            # Generate response
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
+                
+                # Display spinner while processing
+                with st.spinner("🔍 Analyzing the image..."):
+                    try:
+                        # Get selected model params
+                        model_id = st.session_state.vision_selected_model
+                        temperature = st.session_state.vision_temperature
+                        max_tokens = st.session_state.vision_max_tokens
+                        
+                        # Prepare system message
+                        system_prompt = """You are VisionAI, an expert at analyzing and describing images.
+                        When given an image, provide detailed, accurate descriptions or answer questions about the content.
+                        Be specific about what you can see in the image, including colors, objects, text, people, and other details.
+                        If you're not sure about something in the image, say so rather than guessing."""
+                        
+                        # Prepare messages for the API call
+                        messages = [
+                            {"role": "system", "content": system_prompt},
+                            user_message  # This contains both text and image
+                        ]
+                        
+                        # Call Groq API with vision parameters (with caching if enabled)
+                        stream = True  # Always use streaming for real-time feedback
+                        use_cache = st.session_state.get("vision_cache_enabled", True) and not stream
+                        
+                        try:
+                            response = cached_query_groq_vision_model(
+                                model_id=model_id,
+                                messages=messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                                stream=stream,
+                                use_cache=use_cache
+                            )
+                            
+                            # Process the streaming response
+                            for chunk in response:
+                                if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content:
+                                    full_response += chunk.choices[0].delta.content
+                                    message_placeholder.markdown(full_response + "▌")
+                                    time.sleep(0.01)
+                                elif hasattr(chunk.choices[0], 'message') and chunk.choices[0].message.content:
+                                    # Handle non-streaming responses or API changes
+                                    content = chunk.choices[0].message.content
+                                    if content and not full_response:
+                                        full_response = content
+                                        message_placeholder.markdown(full_response)
+                        except Exception as e:
+                            error_message = str(e)
+                            st.error(f"API Error: {error_message}")
+                            full_response = f"I encountered an error while processing the image: {error_message}"
+                        
+                        # Update with complete response
+                        message_placeholder.markdown(full_response)
+                        
+                    except Exception as e:
+                        error_message = str(e)
+                        st.error(f"Error: {error_message}")
+                        
+                        # Add debugging information
+                        st.expander("Debug Information", expanded=False).json({
+                            "error": error_message,
+                            "model": model_id,
+                        })
+                        
+                        full_response = f"I apologize, but I encountered an error while analyzing the image: {error_message}"
+                        message_placeholder.markdown(full_response)
+            
+            # Add assistant response to history
+            st.session_state.vision_messages.append({"role": "assistant", "content": full_response})
+            
+            # Backup the chat history
+            try:
+                # Create a special version of messages that includes image path for backup
+                backup_messages = []
+                for i, msg in enumerate(st.session_state.vision_messages):
+                    backup_msg = msg.copy()
+                    if i == len(st.session_state.vision_messages) - 2 and msg.get("has_image", False):
+                        # This is the user message with image
+                        backup_msg["image_path"] = st.session_state.last_uploaded_image
+                    backup_messages.append(backup_msg)
+                
+                # Save to history
+                backup_chat_history(
+                    messages=backup_messages,
+                    document_name=f"VisionAI_{model_id}",
+                    model_id=model_id
+                )
+            except Exception as e:
+                st.toast(f"Error backing up vision analysis: {str(e)}", icon="⚠️")
+        else:
+            st.error("The image file is no longer available. Please upload it again.")
+
+with tabs[1]:
+    # Advanced Vision Features
+    st.markdown("## Advanced Vision Features")
+    st.markdown("""
+        <p style="color: #e0e0e0; font-size: 0.9em;">
+            Explore advanced features for image analysis including region-specific questioning,
+            image comparison, and image annotation.
+        </p>
+    """, unsafe_allow_html=True)
+    
+    # Check if we have an image to work with
+    if st.session_state.last_uploaded_image and os.path.exists(st.session_state.last_uploaded_image):
+        image = Image.open(st.session_state.last_uploaded_image)
+        
+        # Create subtabs for different features
+        feature_tabs = st.tabs(["Region Selection", "Image Comparison", "Image Annotation"])
+        
+        with feature_tabs[0]:
+            st.markdown("### Region-Specific Analysis")
+            st.markdown("""
+                <p style="color: #e0e0e0; font-size: 0.9em;">
+                    Select a specific region of the image to analyze or ask questions about.
+                </p>
+            """, unsafe_allow_html=True)
+            
+            # Create region selection UI
+            region_result = create_selectable_image_regions(image)
+            
+            if region_result["action"] in ["extract", "highlight"]:
+                # Add a prompt for the selected region
+                st.markdown("### Ask about this region")
+                region_prompt = st.text_area(
+                    "Your question about this region",
+                    placeholder=f"What can you tell me about the {region_result['region']} part of the image?",
+                    key="region_prompt"
+                )
+                
+                if st.button("Analyze Region", key="analyze_region"):
+                    # Prepare the message with region image
+                    region_image = region_result["image"]
+                    
+                    # Save region image temporarily
+                    region_path = os.path.join(
+                        IMAGE_UPLOAD_PATH, 
+                        f"region_{region_result['region']}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+                    )
+                    region_image.save(region_path)
+                    
+                    # Encode image to base64
+                    base64_image = ""
+                    with open(region_path, "rb") as img_file:
+                        base64_image = base64.b64encode(img_file.read()).decode('utf-8')
+                    
+                    # Default prompt if none provided
+                    if not region_prompt:
+                        region_prompt = f"What can you tell me about the {region_result['region']} part of the image?"
+                    
+                    # Create user message with region image
+                    user_message = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": region_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                    
+                    # Display user message
+                    with st.chat_message("user"):
+                        st.markdown(region_prompt)
+                        st.image(region_image, width=300)
+                    
+                    # Generate response for the region
+                    with st.chat_message("assistant"):
+                        message_placeholder = st.empty()
+                        full_response = ""
+                        
+                        with st.spinner(f"🔍 Analyzing the {region_result['region']} region..."):
+                            try:
+                                # Get model parameters
+                                model_id = st.session_state.vision_selected_model
+                                temperature = st.session_state.vision_temperature
+                                max_tokens = st.session_state.vision_max_tokens
+                                
+                                # Prepare system message specifically for region analysis
+                                system_prompt = f"""You are VisionAI, an expert at analyzing specific regions of images.
+                                You are now examining the {region_result['region']} region of an image.
+                                Focus your analysis on this specific area and what you can see there.
+                                Be detailed and precise about the content in this region only."""
+                                
+                                # Prepare messages for API call
+                                messages = [
+                                    {"role": "system", "content": system_prompt},
+                                    user_message
+                                ]
+                                
+                                # Call API with streaming
+                                response = cached_query_groq_vision_model(
+                                    model_id=model_id,
+                                    messages=messages,
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    stream=True,
+                                    use_cache=st.session_state.get("vision_cache_enabled", True)
+                                )
+                                
+                                # Process streaming response
+                                for chunk in response:
+                                    if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content:
+                                        full_response += chunk.choices[0].delta.content
+                                        message_placeholder.markdown(full_response + "▌")
+                                        time.sleep(0.01)
+                                    elif hasattr(chunk.choices[0], 'message') and chunk.choices[0].message.content:
+                                        content = chunk.choices[0].message.content
+                                        if content and not full_response:
+                                            full_response = content
+                                            message_placeholder.markdown(full_response)
+                                
+                                # Final update
+                                message_placeholder.markdown(full_response)
+                                
+                            except Exception as e:
+                                error_message = str(e)
+                                st.error(f"Error: {error_message}")
+                                full_response = f"I apologize, but I encountered an error while analyzing the region: {error_message}"
+                                message_placeholder.markdown(full_response)
+        
+        with feature_tabs[1]:
+            st.markdown("### Image Comparison")
+            st.markdown("""
+                <p style="color: #e0e0e0; font-size: 0.9em;">
+                    Compare the current image with another image using different comparison methods.
+                </p>
+            """, unsafe_allow_html=True)
+            
+            # Use the current image as the first image
+            comparison_result = create_image_comparison_ui(image1=image)
+            
+            if comparison_result["result"] is not None:
+                # Allow asking about the comparison
+                st.markdown("### Ask about the comparison")
+                comparison_prompt = st.text_area(
+                    "Your question about the comparison",
+                    placeholder="What are the main differences between these two images?",
+                    key="comparison_prompt"
+                )
+                
+                if st.button("Analyze Comparison", key="analyze_comparison"):
+                    # Save comparison result temporarily
+                    comparison_path = os.path.join(
+                        IMAGE_UPLOAD_PATH, 
+                        f"comparison_{comparison_result['method']}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+                    )
+                    comparison_result["result"].save(comparison_path)
+                    
+                    # Encode comparison image to base64
+                    base64_comparison = ""
+                    with open(comparison_path, "rb") as img_file:
+                        base64_comparison = base64.b64encode(img_file.read()).decode('utf-8')
+                    
+                    # Default prompt if none provided
+                    if not comparison_prompt:
+                        comparison_prompt = f"Analyze this {comparison_result['method']} comparison of two images. What are the key differences or similarities?"
+                    
+                    # Create message with comparison image
+                    user_message = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": comparison_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_comparison}"
+                                }
+                            }
+                        ]
+                    }
+                    
+                    # Display user message
+                    with st.chat_message("user"):
+                        st.markdown(comparison_prompt)
+                        st.image(comparison_result["result"], width=500)
+                    
+                    # Generate response for the comparison
+                    with st.chat_message("assistant"):
+                        message_placeholder = st.empty()
+                        full_response = ""
+                        
+                        with st.spinner("🔍 Analyzing the image comparison..."):
+                            try:
+                                # Get model parameters
+                                model_id = st.session_state.vision_selected_model
+                                temperature = st.session_state.vision_temperature
+                                max_tokens = st.session_state.vision_max_tokens
+                                
+                                # Prepare system message for comparison analysis
+                                system_prompt = f"""You are VisionAI, an expert at analyzing image comparisons.
+                                You are looking at a {comparison_result['method']} comparison of two images.
+                                Focus on identifying and describing the differences or similarities between the images.
+                                Be detailed and precise in your analysis."""
+                                
+                                # Prepare messages for API call
+                                messages = [
+                                    {"role": "system", "content": system_prompt},
+                                    user_message
+                                ]
+                                
+                                # Call API with streaming
+                                response = cached_query_groq_vision_model(
+                                    model_id=model_id,
+                                    messages=messages,
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    stream=True,
+                                    use_cache=st.session_state.get("vision_cache_enabled", True)
+                                )
+                                
+                                # Process streaming response
+                                for chunk in response:
+                                    if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content:
+                                        full_response += chunk.choices[0].delta.content
+                                        message_placeholder.markdown(full_response + "▌")
+                                        time.sleep(0.01)
+                                    elif hasattr(chunk.choices[0], 'message') and chunk.choices[0].message.content:
+                                        content = chunk.choices[0].message.content
+                                        if content and not full_response:
+                                            full_response = content
+                                            message_placeholder.markdown(full_response)
+                                
+                                # Final update
+                                message_placeholder.markdown(full_response)
+                                
+                            except Exception as e:
+                                error_message = str(e)
+                                st.error(f"Error: {error_message}")
+                                full_response = f"I apologize, but I encountered an error while analyzing the comparison: {error_message}"
+                                message_placeholder.markdown(full_response)
+        
+        with feature_tabs[2]:
+            st.markdown("### Image Annotation")
+            st.markdown("""
+                <p style="color: #e0e0e0; font-size: 0.9em;">
+                    Add annotations, highlights, and markup to your image.
+                </p>
+            """, unsafe_allow_html=True)
+            
+            # Use the current image for annotation
+            annotation_result = create_image_annotation_ui(image=image)
+            
+            if annotation_result["image"] is not None:
+                # Allow saving the annotated image
+                st.markdown("### Save Annotated Image")
+                
+                # Convert to bytes for download
+                img_bytes = BytesIO()
+                annotation_result["image"].save(img_bytes, format="PNG")
+                img_bytes.seek(0)
+                
+                # Create download button
+                st.download_button(
+                    label="Download Annotated Image",
+                    data=img_bytes,
+                    file_name=f"annotated_image_{datetime.now().strftime('%Y%m%d%H%M%S')}.png",
+                    mime="image/png"
+                )
+                
+                # Option to analyze the annotated image
+                if st.button("Analyze Annotated Image", key="analyze_annotated"):
+                    # Save annotated image temporarily
+                    annotated_path = os.path.join(
+                        IMAGE_UPLOAD_PATH, 
+                        f"annotated_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+                    )
+                    annotation_result["image"].save(annotated_path)
+                    
+                    # Encode image to base64
+                    base64_annotated = ""
+                    with open(annotated_path, "rb") as img_file:
+                        base64_annotated = base64.b64encode(img_file.read()).decode('utf-8')
+                    
+                    # Create prompt for annotated image
+                    annotated_prompt = "Describe this annotated image in detail, paying special attention to the annotations and what they highlight."
+                    
+                    # Create message with annotated image
+                    user_message = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": annotated_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_annotated}"
+                                }
+                            }
+                        ]
+                    }
+                    
+                    # Display user message
+                    with st.chat_message("user"):
+                        st.markdown(annotated_prompt)
+                        st.image(annotation_result["image"], width=500)
+                    
+                    # Generate response for the annotated image
+                    with st.chat_message("assistant"):
+                        message_placeholder = st.empty()
+                        full_response = ""
+                        
+                        with st.spinner("🔍 Analyzing the annotated image..."):
+                            try:
+                                # Get model parameters
+                                model_id = st.session_state.vision_selected_model
+                                temperature = st.session_state.vision_temperature
+                                max_tokens = st.session_state.vision_max_tokens
+                                
+                                # Prepare system message for annotated image analysis
+                                system_prompt = """You are VisionAI, an expert at analyzing annotated images.
+                                Focus on describing both the image content and the annotations that have been added.
+                                Pay special attention to any text, arrows, circles, or rectangles that highlight specific areas."""
+                                
+                                # Prepare messages for API call
+                                messages = [
+                                    {"role": "system", "content": system_prompt},
+                                    user_message
+                                ]
+                                
+                                # Call API with streaming
+                                response = cached_query_groq_vision_model(
+                                    model_id=model_id,
+                                    messages=messages,
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    stream=True,
+                                    use_cache=st.session_state.get("vision_cache_enabled", True)
+                                )
+                                
+                                # Process streaming response (same pattern as before)
+                                for chunk in response:
+                                    if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content:
+                                        full_response += chunk.choices[0].delta.content
+                                        message_placeholder.markdown(full_response + "▌")
+                                        time.sleep(0.01)
+                                    elif hasattr(chunk.choices[0], 'message') and chunk.choices[0].message.content:
+                                        content = chunk.choices[0].message.content
+                                        if content and not full_response:
+                                            full_response = content
+                                            message_placeholder.markdown(full_response)
+                                
+                                # Final update
+                                message_placeholder.markdown(full_response)
+                                
+                            except Exception as e:
+                                error_message = str(e)
+                                st.error(f"Error: {error_message}")
+                                full_response = f"I apologize, but I encountered an error while analyzing the annotated image: {error_message}"
+                                message_placeholder.markdown(full_response)
+    else:
+        # No image uploaded yet
+        st.info("Please upload an image in the 'Image Analysis' tab before using advanced features.")
+        
+        # Example image placeholders
+        st.markdown("### Example Advanced Features")
+        
+        # Create columns for examples
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("**Region Selection**")
+            st.image("https://placehold.co/300x300/2d2d2d/b39ddb?text=Region+Selection", use_container_width=True)
+            st.markdown("Analyze specific parts of an image")
+        
+        with col2:
+            st.markdown("**Image Comparison**")
+            st.image("https://placehold.co/300x300/2d2d2d/b39ddb?text=Image+Comparison", use_container_width=True)
+            st.markdown("Compare two images to find differences")
+        
+        with col3:
+            st.markdown("**Image Annotation**")
+            st.image("https://placehold.co/300x300/2d2d2d/b39ddb?text=Image+Annotation", use_container_width=True)
+            st.markdown("Add notes and markers to your images")
+
+with tabs[2]:
+    # History of previously analyzed images
+    st.markdown("### Previously Analyzed Images")
+    
+    from src.utils import get_chat_history_backups, load_chat_history_backup
+    
+    # Get all chat history backups for VisionAI
+    chat_backups = get_chat_history_backups()
+    vision_backups = [b for b in chat_backups if b.get('document', '').startswith('VisionAI_')]
+    
+    if not vision_backups:
+        st.info("No previous image analyses found. Upload some images to build your history!")
+    else:
+        # Group by date
+        from collections import defaultdict
+        grouped_backups = defaultdict(list)
+        
+        for backup in vision_backups:
+            date = backup.get('date', 'Unknown date')
+            grouped_backups[date].append(backup)
+        
+        # Sort dates (newest first)
+        sorted_dates = sorted(grouped_backups.keys(), reverse=True)
+        
+        # Create tabs for each date
+        date_tabs = st.tabs(sorted_dates)
+        
+        for i, date in enumerate(sorted_dates):
+            with date_tabs[i]:
+                # Sort by time (newest first)
+                day_backups = sorted(grouped_backups[date], key=lambda x: x.get('time', ''), reverse=True)
+                
+                for j, backup in enumerate(day_backups):
+                    # Extract data
+                    messages = load_chat_history_backup(backup.get('file_path'))
+                    
+                    # Find the user prompt and image path
+                    user_msg = None
+                    image_path = None
+                    
+                    for msg in messages:
+                        if msg.get("role") == "user" and msg.get("has_image", False):
+                            user_msg = msg
+                            image_path = msg.get("image_path")
+                            break
+                    
+                    prompt = user_msg.get("content") if user_msg else "Unknown prompt"
+                    model = backup.get('model', 'Unknown model')
+                    time = backup.get('time', 'Unknown time')
+                    
+                    # Display in an expander
+                    with st.expander(f"{time} - {prompt[:80]}{'...' if len(prompt) > 80 else ''}", expanded=False):
+                        st.markdown(f"**Model:** {model}")
+                        st.markdown(f"**Time:** {time}")
+                        
+                        # Display the analyzed image if available
+                        if image_path and os.path.exists(image_path):
+                            adaptive_image_display(image_path, 350)
+                        else:
+                            st.warning("Original image is no longer available")
+                        
+                        # Display the conversation
+                        for msg in messages:
+                            role = msg.get("role")
+                            content = msg.get("content")
+                            
+                            if role and content:
+                                with st.chat_message(role):
+                                    if role == "user" and msg.get("has_image", False):
+                                        st.markdown(content)
+                                        if image_path and os.path.exists(image_path):
+                                            adaptive_image_display(image_path, 300)
+                                    else:
+                                        st.markdown(content)
+                        
+                        # Delete button
+                        if st.button("Delete this analysis", key=f"delete_{date}_{j}"):
+                            try:
+                                os.remove(backup.get('file_path'))
+                                st.success("Analysis deleted!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error deleting analysis: {str(e)}")
+
+# Footer
+st.divider()
+st.markdown(f"""
+    <div style="text-align: center; padding: 10px; color: #999999; font-size: 0.8em; margin-top: 30px;">
+        <p>© {CURRENT_YEAR} {APP_NAME} - VisionAI</p>
+        <p style="margin-top: 10px;">
+            <a href="https://groq.com" target="_blank" rel="noopener noreferrer">
+                <img 
+                    src="https://groq.com/wp-content/uploads/2024/03/PBG-mark1-color.svg" 
+                    alt="Powered by Groq for fast inference."
+                    style="height: 40px; margin-bottom: 10px;"
+                />
+            </a>
+        </p>
+        <p style="font-size: 0.9em; color: #666666;">Vision models for image analysis</p>
+        <p style="margin-top: 10px;">
+            <a href="/" target="_self" style="color: #7e57c2; text-decoration: none; font-size: 0.9em; margin-right: 20px;">
+                Home 🏠
+            </a>
+            <a href="/Chat_History" target="_self" style="color: #7e57c2; text-decoration: none; font-size: 0.9em; margin-right: 20px;">
+                History 💬
+            </a>
+        </p>
+    </div>
+""", unsafe_allow_html=True)
+
+# Add mobile navigation for small screens
+device_type = get_device_type()
+if device_type == "mobile":
+    create_mobile_navigation()

@@ -1,0 +1,30 @@
+[
+  {
+    "timestamp": "2025-05-16T11:54:44.489628",
+    "model_id": "llama-3.1-70b",
+    "response_time": 2.500009536743164,
+    "input_tokens": 150,
+    "output_tokens": 300,
+    "total_tokens": 450,
+    "estimated_cost": 0.0001575,
+    "is_cached": false,
+    "query_type": "text",
+    "success": true,
+    "error_type": null,
+    "template_id": null
+  },
+  {
+    "timestamp": "2025-05-16T11:54:44.490105",
+    "model_id": "llama-3.1-8b",
+    "response_time": 1.2000041007995605,
+    "input_tokens": 100,
+    "output_tokens": 200,
+    "total_tokens": 300,
+    "estimated_cost": 5.599999999999999e-05,
+    "is_cached": true,
+    "query_type": "text",
+    "success": true,
+    "error_type": null,
+    "template_id": null
+  }
+]

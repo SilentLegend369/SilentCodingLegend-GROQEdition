@@ -1,0 +1,20 @@
+# Core dependencies
+streamlit>=1.26.0
+groq>=0.4.0
+python-dotenv>=1.0.0
+pandas>=1.5.3
+pillow>=9.5.0
+streamlit-extras>=0.3.0
+watchdog>=3.0.0
+fpdf>=1.7.2
+markdown>=3.5
+pygments>=2.16.1
+plotly>=5.15.0
+pdfminer.six>=20221105
+docx2txt>=0.8
+python-pptx>=0.6.21
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
