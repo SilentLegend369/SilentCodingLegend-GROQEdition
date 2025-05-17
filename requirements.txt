@@ -15,6 +15,7 @@ docx2txt>=0.8
 python-pptx>=0.6.21
 reportlab
 opencv-python
+PyPDF2
 
 
 # Testing dependencies
