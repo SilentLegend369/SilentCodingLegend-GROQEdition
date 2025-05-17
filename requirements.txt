@@ -14,7 +14,7 @@ pdfminer.six>=20221105
 docx2txt>=0.8
 python-pptx>=0.6.21
 reportlab
-opencv-python
+opencv-python-headless>=4.8.0.74
 PyPDF2
 
 
